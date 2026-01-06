@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-01-06
+
+### Added
+- Request ID extraction from API response headers (if available)
+- `ApiError` alias for `ChangeCrabError` for convenience
+- Automatic retry logic for HTTP 429 (Rate Limit) errors
+- Automatic retry logic for transient HTTP 5xx errors (500, 502, 503, 504)
+- `Retry-After` header support for rate limit retries
+
+### Changed
+- Enhanced exception messages to include truncated response bodies (max 500 chars)
+- Exception `__str__` methods now include request ID and response body when available
+- Response bodies in exceptions are automatically sanitized to prevent API key leaks
+- Improved error handling documentation with copy-paste examples
+
+### Security
+- Response data in exceptions is automatically sanitized to redact API keys
+- Response bodies are truncated to prevent leaking large payloads in error messages
+- No sensitive data (API keys, auth headers) exposed in exception messages or logs
+
 ## [0.1.0] - 2026-01-06
 
 ### Added

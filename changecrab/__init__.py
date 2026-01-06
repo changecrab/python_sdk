@@ -16,10 +16,14 @@ from changecrab.exceptions import (
 )
 from changecrab.models import Category, Changelog, Post
 
-__version__ = "0.1.0"
+# Convenience alias for API errors
+ApiError = ChangeCrabError
+
+__version__ = "0.1.1"
 __all__ = [
     "ChangeCrab",
     "ChangeCrabError",
+    "ApiError",
     "AuthenticationError",
     "NotFoundError",
     "ValidationError",

@@ -255,12 +255,15 @@ client.delete_post("abc123def4", post_id=123)
 
 ## Error Handling
 
-The SDK provides specific exception classes for different error scenarios:
+The SDK provides specific exception classes for different error scenarios. All exceptions include status codes, request IDs (if available), and truncated response bodies for debugging.
+
+### Basic Error Handling
 
 ```python
 from changecrab import (
     ChangeCrab,
     ChangeCrabError,
+    ApiError,  # Alias for ChangeCrabError
     AuthenticationError,
     NotFoundError,
     ValidationError,
@@ -280,39 +283,76 @@ try:
 except ValidationError as e:
     # Handle validation errors with field-level details
     print(f"Validation failed: {e.message}")
+    print(f"Status: {e.status_code}")
+    if e.request_id:
+        print(f"Request ID: {e.request_id}")
+    
+    # Access field-level validation errors
     for field, messages in e.errors.items():
         print(f"  {field}: {', '.join(messages)}")
+    
+    # Response body is automatically truncated and sanitized
+    # (no API keys or sensitive data leaked)
+    if e.response_data:
+        print(f"Response: {e.response_data}")
 
 except AuthenticationError as e:
     # Invalid or missing API key
-    print(f"Auth failed: {e.message}")
+    print(f"Auth failed: {e.message} (status: {e.status_code})")
+    if e.request_id:
+        print(f"Request ID: {e.request_id}")
 
 except NotFoundError as e:
     # Resource doesn't exist
     print(f"Not found: {e.message}")
 
 except RateLimitError as e:
-    # Too many requests - implement backoff
-    print("Rate limited. Waiting before retry...")
+    # Rate limit exceeded - SDK automatically retries with backoff
+    # This exception is only raised if all retries are exhausted
+    print(f"Rate limited: {e.message}")
+    print("The SDK automatically retried with exponential backoff")
 
 except ServerError as e:
-    # ChangeCrab server error - retry may help
-    print(f"Server error: {e.message}")
+    # Server error - SDK automatically retries transient 5xx errors
+    print(f"Server error: {e.message} (status: {e.status_code})")
 
-except ChangeCrabError as e:
-    # Catch-all for any SDK error
-    print(f"Error: {e.message} (status: {e.status_code})")
+except (ChangeCrabError, ApiError) as e:
+    # Catch-all for any SDK error (ApiError is an alias)
+    print(f"Error: {e.message}")
+    print(f"Status: {e.status_code}")
+    if e.request_id:
+        print(f"Request ID: {e.request_id}")
 ```
+
+### Exception Properties
+
+All exceptions provide the following properties:
+
+- `message`: Human-readable error message
+- `status_code`: HTTP status code (if available)
+- `request_id`: Request ID from API response headers (if available)
+- `response_data`: Sanitized and truncated response body (max 500 chars, API keys redacted)
+- `errors`: Field-level validation errors (ValidationError only)
+
+### Automatic Retries
+
+The SDK automatically retries on:
+
+- **Network errors**: Timeouts and connection errors (exponential backoff)
+- **HTTP 429 (Rate Limit)**: Respects `Retry-After` header if present
+- **HTTP 5xx (Server Errors)**: 500, 502, 503, 504 (exponential backoff)
+
+Retries are capped at `max_retries` (default: 3). Exceptions are only raised after all retries are exhausted.
 
 ### Exception Hierarchy
 
 ```
-ChangeCrabError (base)
+ChangeCrabError (base) / ApiError (alias)
 ├── AuthenticationError  # 401, 403
 ├── NotFoundError        # 404
 ├── ValidationError      # 422 (includes field errors)
-├── RateLimitError       # 429
-└── ServerError          # 5xx
+├── RateLimitError       # 429 (after retries exhausted)
+└── ServerError          # 5xx (after retries exhausted)
 ```
 
 ---

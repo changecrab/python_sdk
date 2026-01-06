@@ -1,5 +1,7 @@
 """Main client for the ChangeCrab API."""
 
+import json
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +26,9 @@ class ChangeCrab:
     DEFAULT_MAX_RETRIES = 3
     DEFAULT_RETRY_DELAY = 1.0
 
+    # HTTP status codes that should trigger retries
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
     def __init__(
         self,
         api_key: str,
@@ -47,6 +52,100 @@ class ChangeCrab:
             "Accept": "application/json",
         })
 
+    @staticmethod
+    def _sanitize_response_data(data: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+        """
+        Sanitize response data to prevent leaking secrets.
+
+        Redacts API keys and truncates large response bodies.
+        """
+        if not data:
+            return {}
+        
+        # Create a deep copy to avoid modifying the original
+        sanitized = json.loads(json.dumps(data))
+        
+        # Redact API key patterns in string values
+        api_key_pattern = re.compile(
+            re.escape(api_key[:8]) + r".*" if len(api_key) > 8 else re.escape(api_key),
+            re.IGNORECASE
+        )
+        
+        def redact_strings(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: redact_strings(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [redact_strings(item) for item in obj]
+            elif isinstance(obj, str):
+                # Redact API key if found in string
+                if api_key in obj or (len(api_key) > 8 and api_key[:8] in obj):
+                    return api_key_pattern.sub("[REDACTED]", obj)
+                return obj
+            return obj
+        
+        return redact_strings(sanitized)
+
+    @staticmethod
+    def _extract_request_id(response: requests.Response) -> Optional[str]:
+        """Extract request ID from response headers if present."""
+        try:
+            # Common header names for request IDs
+            request_id_headers = [
+                "X-Request-ID",
+                "X-Request-Id",
+                "Request-ID",
+                "Request-Id",
+                "X-Correlation-ID",
+                "X-Correlation-Id",
+            ]
+            for header in request_id_headers:
+                request_id = response.headers.get(header)
+                if request_id and isinstance(request_id, str):
+                    return request_id
+        except (AttributeError, TypeError):
+            # Handle cases where headers might not be a dict-like object
+            pass
+        return None
+
+    @staticmethod
+    def _parse_retry_after(response: requests.Response) -> float:
+        """
+        Parse Retry-After header from response.
+
+        Returns delay in seconds. Supports both integer seconds and HTTP-date format.
+        """
+        try:
+            retry_after = response.headers.get("Retry-After")
+            if not retry_after:
+                return 0.0
+            
+            # Ensure we have a string or number, not a Mock or other object
+            if not isinstance(retry_after, (str, int, float)):
+                return 0.0
+            
+            try:
+                # Try parsing as integer (seconds)
+                return float(retry_after)
+            except ValueError:
+                # Try parsing as HTTP-date (RFC 7231)
+                try:
+                    from email.utils import parsedate_to_datetime
+                    retry_date = parsedate_to_datetime(str(retry_after))
+                    if retry_date:
+                        import datetime
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        if retry_date.tzinfo is None:
+                            retry_date = retry_date.replace(tzinfo=datetime.timezone.utc)
+                        delay = (retry_date - now).total_seconds()
+                        return max(0.0, delay)
+                except (ValueError, TypeError):
+                    pass
+        except (AttributeError, TypeError):
+            # Handle cases where headers might not be a dict-like object
+            pass
+        
+        return 0.0
+
     def _request(
         self,
         method: str,
@@ -54,9 +153,17 @@ class ChangeCrab:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Make an HTTP request to the API with retry logic."""
+        """
+        Make an HTTP request to the API with retry logic.
+
+        Retries on:
+        - Network errors (Timeout, ConnectionError)
+        - HTTP 429 (Rate Limit) - respects Retry-After header
+        - HTTP 5xx (Server errors: 500, 502, 503, 504)
+        """
         url = f"{self._base_url}{endpoint}"
         last_exception = None
+        last_response = None
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -67,7 +174,33 @@ class ChangeCrab:
                     json=json,
                     timeout=self._timeout,
                 )
+                
+                # Check if we should retry based on status code
+                if response.status_code in self.RETRYABLE_STATUS_CODES:
+                    last_response = response
+                    
+                    # Don't retry on last attempt
+                    if attempt < self._max_retries:
+                        # For 429, respect Retry-After header if present
+                        if response.status_code == 429:
+                            retry_after = self._parse_retry_after(response)
+                            if retry_after > 0:
+                                delay = retry_after
+                            else:
+                                delay = self._retry_delay * (2 ** attempt)
+                        else:
+                            # For 5xx errors, use exponential backoff
+                            delay = self._retry_delay * (2 ** attempt)
+                        
+                        time.sleep(delay)
+                        continue
+                    else:
+                        # Last attempt failed, handle the error response
+                        return self._handle_response(response)
+                
+                # Success or non-retryable error - handle normally
                 return self._handle_response(response)
+                
             except (requests.Timeout, requests.ConnectionError) as e:
                 last_exception = e
                 if attempt < self._max_retries:
@@ -75,53 +208,85 @@ class ChangeCrab:
                     time.sleep(delay)
                     continue
             except requests.RequestException as e:
+                # Non-retryable request exception
                 raise ChangeCrabError(f"Request failed: {str(e)}")
 
+        # All retries exhausted
         if last_exception:
             error_msg = (
                 f"Request failed after {self._max_retries + 1} attempts: "
                 f"{str(last_exception)}"
             )
             raise ChangeCrabError(error_msg)
+        
+        if last_response:
+            # Handle the last response that triggered retries
+            return self._handle_response(last_response)
+        
         raise ChangeCrabError("Request failed: Unknown error")
 
     def _handle_response(self, response: requests.Response) -> Dict[str, Any]:
-        """Handle API response and raise appropriate exceptions for errors."""
+        """
+        Handle API response and raise appropriate exceptions for errors.
+
+        Sanitizes response data to prevent leaking secrets and includes
+        request ID if available.
+        """
         try:
             data = response.json()
         except ValueError:
             data = {}
 
+        # Sanitize response data to prevent secret leaks
+        sanitized_data = self._sanitize_response_data(data, self._api_key)
+        request_id = self._extract_request_id(response)
+
         if response.status_code == 401:
             error_msg = data.get("error", "Authentication failed")
-            raise AuthenticationError(error_msg, response.status_code, data)
+            raise AuthenticationError(
+                error_msg, response.status_code, sanitized_data, request_id
+            )
 
         if response.status_code == 403:
             error_msg = data.get("error", "Access forbidden")
-            raise AuthenticationError(error_msg, response.status_code, data)
+            raise AuthenticationError(
+                error_msg, response.status_code, sanitized_data, request_id
+            )
 
         if response.status_code == 404:
             error_msg = data.get("error", "Resource not found")
-            raise NotFoundError(error_msg, response.status_code, data)
+            raise NotFoundError(
+                error_msg, response.status_code, sanitized_data, request_id
+            )
 
         if response.status_code == 422:
             error_msg = data.get("error", "Validation failed")
             errors = data.get("errors", {})
             if not isinstance(errors, dict):
                 errors = {}
-            raise ValidationError(error_msg, response.status_code, data, errors)
+            raise ValidationError(
+                error_msg, response.status_code, sanitized_data, errors, request_id
+            )
 
         if response.status_code == 429:
             error_msg = data.get("error", "Rate limit exceeded")
-            raise RateLimitError(error_msg, response.status_code, data)
+            raise RateLimitError(
+                error_msg, response.status_code, sanitized_data, request_id
+            )
 
         if response.status_code >= 500:
             error_msg = data.get("error", "Server error")
-            raise ServerError(error_msg, response.status_code, data)
+            raise ServerError(
+                error_msg, response.status_code, sanitized_data, request_id
+            )
 
         if not response.ok:
-            error_msg = data.get("error", f"Request failed with status {response.status_code}")
-            raise ChangeCrabError(error_msg, response.status_code, data)
+            error_msg = data.get(
+                "error", f"Request failed with status {response.status_code}"
+            )
+            raise ChangeCrabError(
+                error_msg, response.status_code, sanitized_data, request_id
+            )
 
         return data
 

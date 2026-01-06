@@ -214,6 +214,7 @@ class TestChangeCrab:
         mock_response.json.return_value = {"success": False, "error": "Rate limit exceeded"}
         mock_response.status_code = 429
         mock_response.ok = False
+        mock_response.headers = {}  # Empty headers for this test
         mock_session.return_value.request.return_value = mock_response
 
         client = ChangeCrab(api_key="test_key")
