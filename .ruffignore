@@ -1,0 +1,23 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Git
+.git/
+

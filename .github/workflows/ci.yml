@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+
+    - name: Run linting
+      run: |
+        ruff check --fix . --exclude dist,build,*.egg-info,.git || true
+        ruff check . --exclude dist,build,*.egg-info,.git
+
+    - name: Run type checking
+      run: |
+        mypy changecrab
+      continue-on-error: true
+
+    - name: Run tests
+      run: |
+        pytest tests/ -v --cov=changecrab --cov-report=xml --cov-report=term --tb=short
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+      continue-on-error: true
+
+  build:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: test
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build wheel
+
+    - name: Build package
+      run: |
+        python -m build
+
+    - name: Check dist files
+      run: |
+        ls -la dist/
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+        retention-days: 7
+
